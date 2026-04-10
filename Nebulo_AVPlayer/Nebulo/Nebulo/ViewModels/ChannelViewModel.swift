@@ -587,14 +587,14 @@ class ChannelViewModel: ObservableObject {
         let network: String?
     }
 
-    func preResolveGames(_ games: [ESPNEvent]) {
-        
+    func preResolveGames(_ games: [ESPNEvent], fallbackBroadcasts: [String] = []) {
+
         let infos: [GameSearchInfo] = games.map {
             let h = $0.homeCompetitor?.team?.shortDisplayName ?? $0.homeCompetitor?.athlete?.shortName ?? ""
             let a = $0.awayCompetitor?.team?.shortDisplayName ?? $0.awayCompetitor?.athlete?.shortName ?? ""
             return GameSearchInfo(id: $0.id, home: h, away: a, network: $0.broadcastName)
         }
-        
+
         let inputChannels = self.channels
         let inputHidden = self.hiddenIDs
         let hiddenCatIDs = Set(self.categories.filter { $0.isHidden }.map { $0.id })
@@ -602,17 +602,17 @@ class ChannelViewModel: ObservableObject {
         let now = self.currentTime
         let pLang = self.preferredLanguage
         let pQual = self.preferredQuality
-        
-        Task.detached(priority: .utility) { [weak self, inputChannels, inputHidden, hiddenCatIDs, currentEPG, now, infos, pLang, pQual] in
+
+        Task.detached(priority: .utility) { [weak self, inputChannels, inputHidden, hiddenCatIDs, currentEPG, now, infos, pLang, pQual, fallbackBroadcasts] in
             guard let self = self else { return }
-            
+
             for info in infos {
                 if await self.preResolvedCache[info.id] != nil { continue }
-                
-                if let best = ChannelViewModel.resolveBestMatch(home: info.home, away: info.away, network: info.network, channels: inputChannels, hiddenIDs: inputHidden, hiddenCatIDs: hiddenCatIDs, epg: currentEPG, now: now, preferredLanguage: pLang, preferredQuality: pQual) {
+
+                if let best = ChannelViewModel.resolveBestMatch(home: info.home, away: info.away, network: info.network, channels: inputChannels, hiddenIDs: inputHidden, hiddenCatIDs: hiddenCatIDs, epg: currentEPG, now: now, preferredLanguage: pLang, preferredQuality: pQual, fallbackBroadcasts: fallbackBroadcasts) {
                     await MainActor.run {
                         self.preResolvedCache[info.id] = best
-                        
+
                         self.prewarmChannel(best)
                     }
                 }
@@ -620,28 +620,37 @@ class ChannelViewModel: ObservableObject {
         }
     }
     
-    nonisolated static func resolveBestMatch(home: String, away: String, network: String?, channels: [StreamChannel], hiddenIDs: Set<Int>, hiddenCatIDs: Set<Int>, epg: [String: [EPGProgram]], now: Date, preferredLanguage: LanguagePreference, preferredQuality: StreamQuality) -> StreamChannel? {
+    nonisolated static func resolveBestMatch(home: String, away: String, network: String?, channels: [StreamChannel], hiddenIDs: Set<Int>, hiddenCatIDs: Set<Int>, epg: [String: [EPGProgram]], now: Date, preferredLanguage: LanguagePreference, preferredQuality: StreamQuality, fallbackBroadcasts: [String] = []) -> StreamChannel? {
         let homeTokens = SmartSearchLogic.tokenize(home)
         let awayTokens = SmartSearchLogic.tokenize(away)
         let targetNetwork = (network ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        
+
         func matchCount(_ text: String, tokens: [String]) -> Int {
             let lower = text.lowercased()
             return tokens.filter { lower.contains($0) }.count
         }
-        
+
         var bestChannel: StreamChannel? = nil
         var bestScore = 0
-        
+
         for channel in channels {
             if hiddenIDs.contains(channel.id) || hiddenCatIDs.contains(channel.categoryID) { continue }
             if SmartSearchLogic.isBanner(channel.name) { continue }
-            
+
             var score = 0
-            
-            
+
+
             if !targetNetwork.isEmpty && channel.name.localizedCaseInsensitiveContains(targetNetwork) {
                 score += 1000
+            }
+
+            if targetNetwork.isEmpty && !fallbackBroadcasts.isEmpty {
+                for fb in fallbackBroadcasts {
+                    if channel.name.localizedCaseInsensitiveContains(fb) {
+                        score += 10000
+                        break
+                    }
+                }
             }
             
             
@@ -727,8 +736,11 @@ class ChannelViewModel: ObservableObject {
         
         if let gid = gameID, let cached = preResolvedCache[gid] {
             self.isSearchingGame = false
-            withAnimation(.easeInOut(duration: 0.4)) { self.channelToAutoPlay = cached }
+            self.channelToAutoPlay = nil
             self.prewarmChannel(cached)
+            DispatchQueue.main.async { [weak self] in
+                withAnimation(.easeInOut(duration: 0.4)) { self?.channelToAutoPlay = cached }
+            }
             return
         }
     
@@ -742,42 +754,53 @@ class ChannelViewModel: ObservableObject {
         let pQual = self.preferredQuality
         
         self.isSearchingGame = true; self.suggestedChannels = []; self.channelToAutoPlay = nil
-        
-        Task.detached(priority: .userInitiated) { [weak self, inputChannels, inputHidden, hiddenCatIDs, currentEPG, now, manualOrder, pLang, pQual] in
+        let fallbackBroadcasts = sport.fallbackBroadcasts
+
+        Task.detached(priority: .userInitiated) { [weak self, inputChannels, inputHidden, hiddenCatIDs, currentEPG, now, manualOrder, pLang, pQual, fallbackBroadcasts] in
             guard let self = self else { return }
             let homeTokens = SmartSearchLogic.tokenize(home)
             let awayTokens = SmartSearchLogic.tokenize(away)
-            let targetNetwork = (network ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            
+            var targetNetwork = (network ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
             var orderMap: [Int: Int] = [:]
             for (index, id) in manualOrder.enumerated() { orderMap[id] = index }
-            
+
             func matchCount(_ text: String, tokens: [String]) -> Int {
                 let lower = text.lowercased()
                 return tokens.filter { lower.contains($0) }.count
             }
-            
+
             struct ChannelScore {
                 let channel: StreamChannel
                 let score: Int
                 let isNetworkMatch: Bool
                 let isContentMatch: Bool
             }
-            
+
             var scoredChannels: [ChannelScore] = []
-            
+
             for channel in inputChannels {
                 if inputHidden.contains(channel.id) || hiddenCatIDs.contains(channel.categoryID) { continue }
                 if SmartSearchLogic.isBanner(channel.name) { continue }
-                
+
                 var score = 0
-                var isNetMatch = false 
+                var isNetMatch = false
                 var isContMatch = false
-                
-                
+
+
                 if !targetNetwork.isEmpty && channel.name.localizedCaseInsensitiveContains(targetNetwork) {
                     score += 1000
-                    isNetMatch = true 
+                    isNetMatch = true
+                }
+
+                if targetNetwork.isEmpty && !fallbackBroadcasts.isEmpty {
+                    for fb in fallbackBroadcasts {
+                        if channel.name.localizedCaseInsensitiveContains(fb) {
+                            score += 10000
+                            isNetMatch = true
+                            break
+                        }
+                    }
                 }
                 
                 
@@ -816,9 +839,7 @@ class ChannelViewModel: ObservableObject {
                 let totalH = nameH + titleH + descH
                 let totalA = nameA + titleA + descA
                 if totalH > 0 && totalA > 0 { score += 300 }
-                
-                
-                
+
                 let fullInfo = "\(channel.name) \(epgTitle) \(epgDesc)"
                 
                 if score > 0 {
@@ -864,11 +885,7 @@ class ChannelViewModel: ObservableObject {
             
             
             scoredChannels.sort { $0.score > $1.score }
-            
-            
-            
-            
-            
+
             if let best = scoredChannels.first, best.score >= 1300 {
                 let winner = best.channel
                 await MainActor.run {

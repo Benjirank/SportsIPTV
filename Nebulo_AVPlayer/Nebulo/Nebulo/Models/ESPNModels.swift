@@ -37,7 +37,15 @@ struct ESPNEvent: Codable, Identifiable, Hashable, Sendable {
             self._dateParsed = d
         } else {
             formatter.formatOptions = [.withInternetDateTime]
-            self._dateParsed = formatter.date(from: self.date)
+            if let d = formatter.date(from: self.date) {
+                self._dateParsed = d
+            } else {
+                // Some ESPN endpoints return dates without seconds (e.g. "2026-04-10T08:00Z")
+                let df = DateFormatter()
+                df.dateFormat = "yyyy-MM-dd'T'HH:mmX"
+                df.locale = Locale(identifier: "en_US_POSIX")
+                self._dateParsed = df.date(from: self.date)
+            }
         }
     }
     

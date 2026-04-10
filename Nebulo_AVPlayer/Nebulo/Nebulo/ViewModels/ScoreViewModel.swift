@@ -201,7 +201,7 @@ class ScoreViewModel: ObservableObject {
             if aState == "in" && bState == "in" { return a.gameDate > b.gameDate }
             if aState == "pre" && bState == "post" { return true }
             if aState == "post" && bState == "pre" { return false }
-            if aState == "pre" && bState == "pre" { return a.gameDate > b.gameDate }
+            if aState == "pre" && bState == "pre" { return a.gameDate < b.gameDate }
             return a.gameDate > b.gameDate
         }
     }
@@ -306,7 +306,15 @@ class ScoreViewModel: ObservableObject {
                     for sport in SportType.allCases {
                         if sport == .pinned || sport == .soccerLeagues || sport == .domesticCups || sport == .continental || sport == .international { continue }
                         group.addTask {
-                            guard let url = URL(string: sport.endpoint) else { return (sport, nil, nil) }
+                            var urlStr = sport.endpoint
+                            if sport.needsDateRange {
+                                let fmt = DateFormatter()
+                                fmt.dateFormat = "yyyyMMdd"
+                                let today = fmt.string(from: Date().addingTimeInterval(-86400))
+                                let end = fmt.string(from: Date().addingTimeInterval(6 * 86400))
+                                urlStr += "?dates=\(today)-\(end)"
+                            }
+                            guard let url = URL(string: urlStr) else { return (sport, nil, nil) }
                             do {
                                 let events = try await self.fetchEvents(url: url)
                                 return (sport, events, nil)
@@ -354,7 +362,7 @@ class ScoreViewModel: ObservableObject {
             if aState == "in" && bState == "in" { return a.gameDate > b.gameDate }
             if aState == "pre" && bState == "post" { return true }
             if aState == "post" && bState == "pre" { return false }
-            if aState == "pre" && bState == "pre" { return a.gameDate > b.gameDate }
+            if aState == "pre" && bState == "pre" { return a.gameDate < b.gameDate }
             return a.gameDate > b.gameDate
         }
         return events
