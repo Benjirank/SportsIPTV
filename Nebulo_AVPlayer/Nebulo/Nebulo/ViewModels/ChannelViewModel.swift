@@ -619,7 +619,40 @@ class ChannelViewModel: ObservableObject {
             }
         }
     }
-    
+
+    func preResolveNRLGames(_ games: [ESPNEvent], nrlGameChannels: [String: [String]]) {
+        let infos: [GameSearchInfo] = games.map {
+            let h = $0.homeCompetitor?.team?.shortDisplayName ?? $0.homeCompetitor?.athlete?.shortName ?? ""
+            let a = $0.awayCompetitor?.team?.shortDisplayName ?? $0.awayCompetitor?.athlete?.shortName ?? ""
+            return GameSearchInfo(id: $0.id, home: h, away: a, network: $0.broadcastName)
+        }
+
+        let inputChannels = self.channels
+        let inputHidden = self.hiddenIDs
+        let hiddenCatIDs = Set(self.categories.filter { $0.isHidden }.map { $0.id })
+        let currentEPG = self.epgData
+        let now = self.currentTime
+        let pLang = self.preferredLanguage
+        let pQual = self.preferredQuality
+        let defaultFallback = SportType.nrl.fallbackBroadcasts
+
+        Task.detached(priority: .utility) { [weak self, inputChannels, inputHidden, hiddenCatIDs, currentEPG, now, infos, pLang, pQual, nrlGameChannels, defaultFallback] in
+            guard let self = self else { return }
+
+            for info in infos {
+                if await self.preResolvedCache[info.id] != nil { continue }
+
+                let fallback = nrlGameChannels[info.id] ?? defaultFallback
+                if let best = ChannelViewModel.resolveBestMatch(home: info.home, away: info.away, network: info.network, channels: inputChannels, hiddenIDs: inputHidden, hiddenCatIDs: hiddenCatIDs, epg: currentEPG, now: now, preferredLanguage: pLang, preferredQuality: pQual, fallbackBroadcasts: fallback) {
+                    await MainActor.run {
+                        self.preResolvedCache[info.id] = best
+                        self.prewarmChannel(best)
+                    }
+                }
+            }
+        }
+    }
+
     nonisolated static func resolveBestMatch(home: String, away: String, network: String?, channels: [StreamChannel], hiddenIDs: Set<Int>, hiddenCatIDs: Set<Int>, epg: [String: [EPGProgram]], now: Date, preferredLanguage: LanguagePreference, preferredQuality: StreamQuality, fallbackBroadcasts: [String] = []) -> StreamChannel? {
         let homeTokens = SmartSearchLogic.tokenize(home)
         let awayTokens = SmartSearchLogic.tokenize(away)
@@ -732,8 +765,8 @@ class ChannelViewModel: ObservableObject {
         return bestScore >= 1300 ? bestChannel : nil
     }
 
-    func runSmartSearch(gameID: String? = nil, home: String, away: String, sport: SportType, network: String? = nil) {
-        
+    func runSmartSearch(gameID: String? = nil, home: String, away: String, sport: SportType, network: String? = nil, gameChannels: [String]? = nil) {
+
         if let gid = gameID, let cached = preResolvedCache[gid] {
             self.isSearchingGame = false
             self.channelToAutoPlay = nil
@@ -743,7 +776,7 @@ class ChannelViewModel: ObservableObject {
             }
             return
         }
-    
+
         let inputChannels = self.channels
         let inputHidden = self.hiddenIDs
         let hiddenCatIDs = Set(self.categories.filter { $0.isHidden }.map { $0.id })
@@ -752,9 +785,9 @@ class ChannelViewModel: ObservableObject {
         let manualOrder = self.manualChannelOrder
         let pLang = self.preferredLanguage
         let pQual = self.preferredQuality
-        
+
         self.isSearchingGame = true; self.suggestedChannels = []; self.channelToAutoPlay = nil
-        let fallbackBroadcasts = sport.fallbackBroadcasts
+        let fallbackBroadcasts = gameChannels ?? sport.fallbackBroadcasts
 
         Task.detached(priority: .userInitiated) { [weak self, inputChannels, inputHidden, hiddenCatIDs, currentEPG, now, manualOrder, pLang, pQual, fallbackBroadcasts] in
             guard let self = self else { return }
@@ -886,15 +919,38 @@ class ChannelViewModel: ObservableObject {
             
             scoredChannels.sort { $0.score > $1.score }
 
+            // If using fallback broadcasts (e.g. NRL), show selection sheet with all matching channels
+            if !fallbackBroadcasts.isEmpty {
+                let fbMatches = scoredChannels.filter { sc in
+                    fallbackBroadcasts.contains { fb in sc.channel.name.localizedCaseInsensitiveContains(fb) }
+                }
+                if !fbMatches.isEmpty {
+                    let channels = fbMatches.map { $0.channel }
+                    await MainActor.run {
+                        self.isSearchingGame = false
+                        self.suggestedChannels = channels
+                        if channels.count == 1 {
+                            withAnimation(.easeInOut(duration: 0.4)) { self.channelToAutoPlay = channels.first }
+                            self.prewarmChannel(channels.first!)
+                            if let gid = gameID { self.preResolvedCache[gid] = channels.first }
+                        } else {
+                            self.showSelectionSheet = true
+                            for ch in channels.prefix(3) { self.prewarmChannel(ch) }
+                        }
+                    }
+                    return
+                }
+            }
+
             if let best = scoredChannels.first, best.score >= 1300 {
                 let winner = best.channel
                 await MainActor.run {
                     self.isSearchingGame = false
-                    self.suggestedChannels = [winner] 
+                    self.suggestedChannels = [winner]
                     withAnimation(.easeInOut(duration: 0.4)) { self.channelToAutoPlay = winner }
-                    
+
                     self.prewarmChannel(winner)
-                    
+
                     if let gid = gameID { self.preResolvedCache[gid] = winner }
                 }
                 return

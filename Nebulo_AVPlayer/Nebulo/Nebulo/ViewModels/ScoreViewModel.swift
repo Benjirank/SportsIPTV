@@ -18,6 +18,8 @@ class ScoreViewModel: ObservableObject {
     @Published var sportTabOrder: [SportType] = []
     @Published var hiddenSportTabs: Set<SportType> = []
     @Published var renamedSportTabs: [String: String] = [:]
+    // Per-game broadcast channels from NRL API, keyed by ESPN event ID
+    var nrlGameChannels: [String: [String]] = [:]
     private var currentSearchText = ""
     
     static let noCacheSession: URLSession = {
@@ -336,6 +338,11 @@ class ScoreViewModel: ObservableObject {
                     }
                 }
                 
+                // Fetch NRL broadcast data and match to ESPN events
+                if let nrlEvents = await MainActor.run(body: { self.masterGames[.nrl] }), !nrlEvents.isEmpty {
+                    await self.matchNRLBroadcasts(events: nrlEvents)
+                }
+
                 await MainActor.run {
                     self.updatePinnedGames()
                     self.saveToCache()
@@ -368,6 +375,22 @@ class ScoreViewModel: ObservableObject {
         return events
     }
     
+    private func matchNRLBroadcasts(events: [ESPNEvent]) async {
+        let broadcasts = await NRLService.shared.fetchBroadcasts()
+        if broadcasts.isEmpty { return }
+
+        var matched: [String: [String]] = [:]
+        for event in events {
+            let homeNick = (event.homeCompetitor?.team?.shortDisplayName ?? "").lowercased()
+            let awayNick = (event.awayCompetitor?.team?.shortDisplayName ?? "").lowercased()
+            let key = "\(homeNick)_vs_\(awayNick)"
+            if let channels = broadcasts[key] {
+                matched[event.id] = channels
+            }
+        }
+        self.nrlGameChannels = matched
+    }
+
     nonisolated private func fetchSoccerInternal(leagues: [(String, String)]) async throws -> ([SoccerGameSection], [ESPNEvent]) {
         var allSections: [SoccerGameSection] = []
         var allGames: [ESPNEvent] = []

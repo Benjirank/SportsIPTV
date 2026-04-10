@@ -111,7 +111,12 @@ struct SportsHubView: View {
         }
         
         if !games.isEmpty {
-            viewModel.preResolveGames(games, fallbackBroadcasts: sport.fallbackBroadcasts)
+            // For NRL, use per-game broadcast channels from NRL API
+            if sport == .nrl {
+                viewModel.preResolveNRLGames(games, nrlGameChannels: scoreViewModel.nrlGameChannels)
+            } else {
+                viewModel.preResolveGames(games, fallbackBroadcasts: sport.fallbackBroadcasts)
+            }
         }
     }
     
@@ -252,11 +257,12 @@ struct SportGamesListView: View {
     }
     
     private func scoreButton(game: ESPNEvent, sport: SportType) -> some View {
-        Button(action: { 
+        Button(action: {
             ChannelViewModel.shared.triggerSelectionHaptic()
             let h = game.homeCompetitor?.team?.shortDisplayName ?? game.homeCompetitor?.athlete?.shortName ?? ""
             let a = game.awayCompetitor?.team?.shortDisplayName ?? game.awayCompetitor?.athlete?.shortName ?? ""
-            viewModel.runSmartSearch(gameID: game.id, home: h, away: a, sport: sport, network: game.broadcastName)
+            let gameChannels = sport == .nrl ? (scoreViewModel.nrlGameChannels[game.id] ?? sport.fallbackBroadcasts) : nil
+            viewModel.runSmartSearch(gameID: game.id, home: h, away: a, sport: sport, network: game.broadcastName, gameChannels: gameChannels)
         }) {
             ScoreRow(game: game, sport: sport, isScoreHidden: scoreViewModel.hiddenScoreGameIDs.contains(game.id), isReminderSet: scoreViewModel.reminderGameIDs.contains(game.id))
         }
